@@ -56,6 +56,16 @@ def generate_launch_description():
         arguments=['-d', rviz_cfg],
         condition=IfCondition(rviz_use)
     )
+    fastlio_path_node = Node(
+        package='fast_lio',
+        executable='fastlio_path_publisher.py',
+        name='fastlio_path_node',
+        parameters=[
+            {'odom_topic': '/Odometry'},
+            {'use_sim_time': use_sim_time}
+        ],
+        output='screen'
+    )
 
     ld = LaunchDescription()
     ld.add_action(declare_use_sim_time_cmd)
@@ -65,6 +75,7 @@ def generate_launch_description():
     ld.add_action(declare_rviz_config_path_cmd)
 
     ld.add_action(fast_lio_node)
+    ld.add_action(fastlio_path_node)
     ld.add_action(rviz_node)
 
     return ld

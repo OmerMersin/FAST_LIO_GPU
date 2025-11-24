@@ -59,7 +59,8 @@ find_package(std_srvs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(pcl_ros REQUIRED)
 find_package(pcl_conversions REQUIRED)
-find_package(livox_ros_driver2 REQUIRED)
+option(FASTLIO_REQUIRE_LIVOX "Fail configuration if livox_ros_driver2 is missing" OFF)
+find_package(livox_ros_driver2 QUIET)
 find_package(rosidl_default_generators REQUIRED)
 
 set(dependencies
@@ -73,8 +74,18 @@ set(dependencies
   visualization_msgs
   pcl_ros
   pcl_conversions
-  livox_ros_driver2
 )
+
+set(FASTLIO_HAS_LIVOX FALSE)
+if(livox_ros_driver2_FOUND)
+  list(APPEND dependencies livox_ros_driver2)
+  set(FASTLIO_HAS_LIVOX TRUE)
+  message(STATUS "livox_ros_driver2 detected: Livox LiDAR support enabled")
+elseif(FASTLIO_REQUIRE_LIVOX)
+  message(FATAL_ERROR "livox_ros_driver2 not found but FASTLIO_REQUIRE_LIVOX is ON. Install the driver or disable the option.")
+else()
+  message(WARNING "livox_ros_driver2 not found: Livox-specific LiDAR pipelines will be disabled.")
+endif()
 
 # Thirdparty libraries
 find_package(Eigen3 REQUIRED)
@@ -100,6 +111,9 @@ target_include_directories(fastlio_mapping PUBLIC
 )
 target_link_libraries(fastlio_mapping ${PCL_LIBRARIES} ${PYTHON_LIBRARIES} Eigen3::Eigen)
 target_include_directories(fastlio_mapping PRIVATE ${PYTHON_INCLUDE_DIRS})
+if(FASTLIO_HAS_LIVOX)
+  target_compile_definitions(fastlio_mapping PRIVATE FASTLIO_HAS_LIVOX)
+endif()
 
 list(APPEND EOL_LIST "foxy" "galactic" "eloquent" "dashing" "crystal")
 
@@ -124,5 +138,11 @@ install(
   DIRECTORY config launch rviz
   DESTINATION share/${PROJECT_NAME}
 )
+
+install(PROGRAMS
+  scripts/fastlio_path_publisher.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 
 ament_package()

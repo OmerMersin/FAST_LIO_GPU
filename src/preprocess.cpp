@@ -1,6 +1,18 @@
 #include "preprocess.h"
 
+#include <algorithm>
 #include <pcl/common/common.h>
+#include <sensor_msgs/point_cloud2_iterator.hpp>
+
+namespace
+{
+inline bool has_field(const sensor_msgs::msg::PointCloud2 &msg, const std::string &name)
+{
+  return std::any_of(msg.fields.begin(), msg.fields.end(), [&name](const auto &field) { return field.name == name; });
+}
+
+const rclcpp::Logger kPreLogger = rclcpp::get_logger("fast_lio.preprocess");
+}
 
 #define RETURN0 0x00
 #define RETURN0AND1 0x10
@@ -44,11 +56,13 @@ void Preprocess::set(bool feat_en, int lid_type, double bld, int pfilt_num)
   point_filter_num = pfilt_num;
 }
 
+#ifdef FASTLIO_HAS_LIVOX
 void Preprocess::process(const livox_ros_driver2::msg::CustomMsg::UniquePtr &msg, PointCloudXYZI::Ptr& pcl_out)
 {
   avia_handler(msg);
   *pcl_out = pl_surf;
 }
+#endif
 
 void Preprocess::process(const sensor_msgs::msg::PointCloud2::UniquePtr &msg, PointCloudXYZI::Ptr& pcl_out)
 {
@@ -92,6 +106,7 @@ void Preprocess::process(const sensor_msgs::msg::PointCloud2::UniquePtr &msg, Po
   *pcl_out = pl_surf;
 }
 
+#ifdef FASTLIO_HAS_LIVOX
 void Preprocess::avia_handler(const livox_ros_driver2::msg::CustomMsg::UniquePtr &msg)
 {
   pl_surf.clear();
@@ -192,17 +207,129 @@ void Preprocess::avia_handler(const livox_ros_driver2::msg::CustomMsg::UniquePtr
     }
   }
 }
+#endif
 
 void Preprocess::oust64_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &msg)
 {
   pl_surf.clear();
   pl_corn.clear();
   pl_full.clear();
-  pcl::PointCloud<ouster_ros::Point> pl_orig;
-  pcl::fromROSMsg(*msg, pl_orig);
-  int plsize = pl_orig.size();
-  pl_corn.reserve(plsize);
-  pl_surf.reserve(plsize);
+
+  const size_t point_count = static_cast<size_t>(msg->width) * static_cast<size_t>(msg->height);
+  if (point_count == 0)
+    return;
+
+  pcl::PointCloud<pcl::PointXYZI> xyz_cloud;
+  pcl::fromROSMsg(*msg, xyz_cloud);
+  const size_t plsize = xyz_cloud.points.size();
+  if (plsize == 0)
+    return;
+
+  const bool ring_field_present = has_field(*msg, "ring");
+  const bool ring_from_rows = !ring_field_present && msg->height > 1 && msg->width > 0;
+  if (!ring_field_present && !ring_from_rows)
+  {
+    RCLCPP_WARN_ONCE(kPreLogger,
+                     "Ouster cloud lacks 'ring' info and is unorganized (height=1). Falling back to generic handler;"
+                     " feature extraction may be degraded.");
+    default_handler(msg);
+    return;
+  }
+
+  std::unique_ptr<sensor_msgs::PointCloud2ConstIterator<uint16_t>> ring_iter_holder;
+  auto *ring_iter = static_cast<sensor_msgs::PointCloud2ConstIterator<uint16_t> *>(nullptr);
+  if (ring_field_present)
+  {
+    ring_iter_holder = std::make_unique<sensor_msgs::PointCloud2ConstIterator<uint16_t>>(*msg, "ring");
+    ring_iter = ring_iter_holder.get();
+  }
+
+  std::string time_field_name;
+  for (const auto &candidate : {"t", "timestamp", "time"})
+  {
+    if (has_field(*msg, candidate))
+    {
+      time_field_name = candidate;
+      break;
+    }
+  }
+
+  std::unique_ptr<sensor_msgs::PointCloud2ConstIterator<uint32_t>> time_iter_holder;
+  auto *time_iter = static_cast<sensor_msgs::PointCloud2ConstIterator<uint32_t> *>(nullptr);
+  if (!time_field_name.empty())
+  {
+    time_iter_holder = std::make_unique<sensor_msgs::PointCloud2ConstIterator<uint32_t>>(*msg, time_field_name);
+    time_iter = time_iter_holder.get();
+  }
+
+  const bool approximate_time = (time_iter == nullptr);
+  const double time_base_raw = time_iter ? static_cast<double>(**time_iter) : 0.0;
+  static bool warned_missing_time = false;
+  if (approximate_time && !warned_missing_time)
+  {
+    RCLCPP_WARN(kPreLogger,
+                "Point cloud missing per-point timestamps ('t'/'timestamp'). Approximating based on column index.");
+    warned_missing_time = true;
+  }
+
+  const float scan_period = (SCAN_RATE > 0) ? (1.0f / static_cast<float>(SCAN_RATE)) : 0.f;
+  const float column_time_ms = (msg->width > 0) ? (scan_period / static_cast<float>(msg->width) * 1000.0f) : 0.f;
+
+  auto next_ring = [&](size_t idx) -> int {
+    if (ring_iter)
+    {
+      int ring = static_cast<int>(**ring_iter);
+      ++(*ring_iter);
+      return ring;
+    }
+    if (ring_from_rows)
+      return static_cast<int>(idx / msg->width);
+    return -1;
+  };
+
+  auto next_time = [&](size_t idx) -> float {
+    if (time_iter)
+    {
+      const double raw_value = static_cast<double>(**time_iter);
+      ++(*time_iter);
+      double corrected = (raw_value - time_base_raw) * static_cast<double>(time_unit_scale);
+      if (corrected < 0.0)
+        corrected = 0.0;
+      return static_cast<float>(corrected);
+    }
+    if (column_time_ms > 0.f && msg->width > 0)
+      return static_cast<float>(idx % msg->width) * column_time_ms;
+    return 0.f;
+  };
+
+  auto process_point = [&](const pcl::PointXYZI &src_pt, size_t idx, bool store_features) {
+    int ring = next_ring(idx);
+    float curvature = next_time(idx);
+
+    double range = src_pt.x * src_pt.x + src_pt.y * src_pt.y + src_pt.z * src_pt.z;
+    if (range < (blind * blind) || ring < 0 || ring >= N_SCANS)
+      return;
+
+    PointType added_pt;
+    added_pt.x = src_pt.x;
+    added_pt.y = src_pt.y;
+    added_pt.z = src_pt.z;
+    added_pt.intensity = src_pt.intensity;
+    added_pt.normal_x = 0;
+    added_pt.normal_y = 0;
+    added_pt.normal_z = 0;
+    added_pt.curvature = curvature;
+
+    if (store_features)
+    {
+      pl_buff[ring].push_back(added_pt);
+    }
+    else if (idx % point_filter_num == 0)
+    {
+      pl_surf.points.push_back(added_pt);
+    }
+  };
+
   if (feature_enabled)
   {
     for (int i = 0; i < N_SCANS; i++)
@@ -211,39 +338,18 @@ void Preprocess::oust64_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &
       pl_buff[i].reserve(plsize);
     }
 
-    for (uint i = 0; i < plsize; i++)
+    for (size_t idx = 0; idx < plsize; ++idx)
     {
-      double range = pl_orig.points[i].x * pl_orig.points[i].x + pl_orig.points[i].y * pl_orig.points[i].y +
-                     pl_orig.points[i].z * pl_orig.points[i].z;
-      if (range < (blind * blind))
-        continue;
-      Eigen::Vector3d pt_vec;
-      PointType added_pt;
-      added_pt.x = pl_orig.points[i].x;
-      added_pt.y = pl_orig.points[i].y;
-      added_pt.z = pl_orig.points[i].z;
-      added_pt.intensity = pl_orig.points[i].intensity;
-      added_pt.normal_x = 0;
-      added_pt.normal_y = 0;
-      added_pt.normal_z = 0;
-      double yaw_angle = atan2(added_pt.y, added_pt.x) * 57.3;
-      if (yaw_angle >= 180.0)
-        yaw_angle -= 360.0;
-      if (yaw_angle <= -180.0)
-        yaw_angle += 360.0;
-
-      added_pt.curvature = pl_orig.points[i].t * time_unit_scale;
-      if (pl_orig.points[i].ring < N_SCANS)
-      {
-        pl_buff[pl_orig.points[i].ring].push_back(added_pt);
-      }
+      process_point(xyz_cloud.points[idx], idx, true);
     }
 
     for (int j = 0; j < N_SCANS; j++)
     {
-      PointCloudXYZI& pl = pl_buff[j];
+      PointCloudXYZI &pl = pl_buff[j];
       int linesize = pl.size();
-      vector<orgtype>& types = typess[j];
+      if (linesize <= 0)
+        continue;
+      vector<orgtype> &types = typess[j];
       types.clear();
       types.resize(linesize);
       linesize--;
@@ -261,36 +367,12 @@ void Preprocess::oust64_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &
   }
   else
   {
-    double time_stamp = rclcpp::Time(msg->header.stamp).seconds();
-    // cout << "===================================" << endl;
-    // printf("Pt size = %d, N_SCANS = %d\r\n", plsize, N_SCANS);
-    for (int i = 0; i < pl_orig.points.size(); i++)
+    pl_surf.reserve(plsize);
+    for (size_t idx = 0; idx < plsize; ++idx)
     {
-      if (i % point_filter_num != 0)
-        continue;
-
-      double range = pl_orig.points[i].x * pl_orig.points[i].x + pl_orig.points[i].y * pl_orig.points[i].y +
-                     pl_orig.points[i].z * pl_orig.points[i].z;
-
-      if (range < (blind * blind))
-        continue;
-
-      Eigen::Vector3d pt_vec;
-      PointType added_pt;
-      added_pt.x = pl_orig.points[i].x;
-      added_pt.y = pl_orig.points[i].y;
-      added_pt.z = pl_orig.points[i].z;
-      added_pt.intensity = pl_orig.points[i].intensity;
-      added_pt.normal_x = 0;
-      added_pt.normal_y = 0;
-      added_pt.normal_z = 0;
-      added_pt.curvature = pl_orig.points[i].t * time_unit_scale;  // curvature unit: ms
-
-      pl_surf.points.push_back(added_pt);
+      process_point(xyz_cloud.points[idx], idx, false);
     }
   }
-  // pub_func(pl_surf, pub_full, msg->header.stamp);
-  // pub_func(pl_surf, pub_corn, msg->header.stamp);
 }
 
 void Preprocess::velodyne_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &msg)

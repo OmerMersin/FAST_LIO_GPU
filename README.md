@@ -74,14 +74,14 @@ PCL    >= 1.8,   Follow [PCL Installation](https://pointclouds.org/downloads/#li
 
 Eigen  >= 3.3.4, Follow [Eigen Installation](http://eigen.tuxfamily.org/index.php?title=Main_Page).
 
-### <span id="1.3">1.3. **livox_ros_driver2**</span>
-Follow [livox_ros_driver2 Installation](https://github.com/Livox-SDK/livox_ros_driver2).
+### <span id="1.3">1.3. **livox_ros_driver2** (optional)</span>
+Install [livox_ros_driver2](https://github.com/Livox-SDK/livox_ros_driver2) **only if you plan to run a Livox LiDAR**.
 
-You can also use the one I modified [livox_ros_driver2](https://github.com/Ericsii/livox_ros_driver2/tree/feature/use-standard-unit)
+You can also use the modified fork [livox_ros_driver2](https://github.com/Ericsii/livox_ros_driver2/tree/feature/use-standard-unit).
 
 *Remarks:*
-- Since the FAST-LIO must support Livox serials LiDAR firstly, so the **livox_ros_driver** must be installed and **sourced** before run any FAST-LIO launch file.
-- How to source? The easiest way is add the line ``` source $Livox_ros_driver_dir$/devel/setup.bash ``` to the end of file ``` ~/.bashrc ```, where ``` $Livox_ros_driver_dir$ ``` is the directory of the livox ros driver workspace (should be the ``` ws_livox ``` directory if you completely followed the livox official document).
+- FAST-LIO will now build and run without `livox_ros_driver2`. When the driver is not present, Livox-specific topics are disabled and you should use standard `sensor_msgs/PointCloud2` topics (e.g., Ouster or Velodyne drivers).
+- If you do use Livox hardware, install and source the driver workspace (e.g., add `source <ws_livox>/install/setup.bash` to your shell rc file) **and** build FAST-LIO with Livox support enabled (pass `-DFASTLIO_REQUIRE_LIVOX=ON` to CMake if you want the build to fail when the driver is missing).
 
 
 ## 2. Build
@@ -95,7 +95,8 @@ Clone the repository and colcon build:
     colcon build --symlink-install
     . ./install/setup.bash # use setup.zsh if use zsh
 ```
-- **Remember to source the livox_ros_driver before build (follow [1.3 livox_ros_driver](#1.3))**
+- **Livox users only:** source the Livox workspace before building so the custom message is discoverable.
+- To force-enable Livox message support (and catch misconfiguration early) configure with `colcon build --cmake-args -DFASTLIO_REQUIRE_LIVOX=ON`.
 - If you want to use a custom build of PCL, add the following line to ~/.bashrc
 ```export PCL_ROOT={CUSTOM_PCL_PATH}```
 ## 3. Directly run
@@ -116,6 +117,20 @@ ros2 launch fast_lio mapping.launch.py config_file:=avia.yaml
 ```
 
 Change `config_file` parameter to other yaml file under config directory as you need.
+
+**Ouster users:** use `config/ouster64.yaml` (or adapt it) and run your Ouster driver (e.g., `ros2 launch ouster_ros sensor.launch`). FAST-LIO will subscribe to the standard `/os_cloud_node/points` and `/os_cloud_node/imu` topics; no Livox SDK is required.
+
+### Frame IDs & TF integration
+FAST-LIO internally works in a simple `map -> odom -> body` frame chain. By default those IDs are `map`, `camera_init`, and `body`, which works for the original datasets but often does not match a robot's `base_link` / `odom` frames. Every config file can now override the TF frame names:
+
+```yaml
+frames:
+    map_frame: "map"        # parent of the published odometry
+    odom_frame: "odom"      # frame used in /Odometry, point clouds, and tf
+    body_frame: "base_link" # child frame that should coincide with the IMU/body
+```
+
+Set `body_frame` to the robot's `base_link` (or IMU frame) to remove RViz warnings such as “No transform from [base_link] to [camera_init]”. If you keep the default names, FAST-LIO will continue to behave exactly as before.
 
 Launch livox ros driver. Use MID360 as an example.
 
