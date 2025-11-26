@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.8)
 project(fast_lio)
 
+option(FASTLIO_USE_CUDA "Enable CUDA accelerated kernels" OFF)
+
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
@@ -17,6 +19,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++14 -pthread -std=c++0x -std=c++14 -fexceptions")
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+if(FASTLIO_USE_CUDA)
+  if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
+    set(CMAKE_CUDA_ARCHITECTURES "72;75;87" CACHE STRING "CUDA architectures" FORCE)
+  endif()
+  enable_language(CUDA)
+  find_package(CUDAToolkit REQUIRED)
+  set(CMAKE_CUDA_STANDARD 14)
+  set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+  add_definitions(-DFASTLIO_USE_CUDA)
+endif()
 
 message("Current CPU archtecture: ${CMAKE_SYSTEM_PROCESSOR}")
 
@@ -103,13 +116,29 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 )
 ament_export_dependencies(rosidl_default_runtime)
 
-add_executable(fastlio_mapping src/laserMapping.cpp include/ikd-Tree/ikd_Tree.cpp src/preprocess.cpp)
+set(FASTLIO_SOURCES
+  src/laserMapping.cpp
+  include/ikd-Tree/ikd_Tree.cpp
+  src/preprocess.cpp)
+
+if(FASTLIO_USE_CUDA)
+  list(APPEND FASTLIO_SOURCES
+    src/gpu/preprocess_gpu.cu
+    src/gpu/gpu_voxel_map.cu)
+endif()
+
+add_executable(fastlio_mapping ${FASTLIO_SOURCES})
 target_include_directories(fastlio_mapping PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
   $<INSTALL_INTERFACE:include>
   ${PCL_INCLUDE_DIRS}
 )
 target_link_libraries(fastlio_mapping ${PCL_LIBRARIES} ${PYTHON_LIBRARIES} Eigen3::Eigen)
+if(FASTLIO_USE_CUDA)
+  target_link_libraries(fastlio_mapping CUDA::cudart CUDA::cublas CUDA::cusolver)
+  target_include_directories(fastlio_mapping PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+endif()
 target_include_directories(fastlio_mapping PRIVATE ${PYTHON_INCLUDE_DIRS})
 if(FASTLIO_HAS_LIVOX)
   target_compile_definitions(fastlio_mapping PRIVATE FASTLIO_HAS_LIVOX)
