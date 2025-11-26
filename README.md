@@ -133,27 +133,25 @@ Change `config_file` parameter to other yaml file under config directory as you 
 
 **Ouster users:** use `config/ouster64.yaml` (or adapt it) and run your Ouster driver (e.g., `ros2 launch ouster_ros sensor.launch`). FAST-LIO will subscribe to the standard `/os_cloud_node/points` and `/os_cloud_node/imu` topics; no Livox SDK is required.
 
-### 3.1.1 Validate the `ouster32_longrun.yaml` profile
-This profile keeps feature extraction enabled and assumes hardware-synchronized `/ouster/points` and `/ouster/imu` streams. To confirm it converges on your robot:
+### 3.1.1 Validate your custom Ouster profile
+Pick whichever YAML under `config/` matches your sensor (e.g., `ouster32.yaml`, `ouster64.yaml`, or your fork). To confirm it converges on your robot:
 
-1. **Launch your sensor driver** with dual-return point clouds disabled and timestamps in nanoseconds (default on Ouster ROS drivers 2.3+).
-2. **Start FAST-LIO** with the long-run config and the correct frames:
+1. **Launch your sensor driver** with synchronized `/ouster/points` and `/ouster/imu` topics and per-point timestamps enabled.
+2. **Start FAST-LIO** with your chosen config:
     ```bash
-    ros2 launch fast_lio mapping.launch.py config_file:=ouster32_longrun.yaml
+    ros2 launch fast_lio mapping.launch.py config_file:=<your_ouster_config>.yaml
     ```
-3. **Watch RViz /Odometry** and the TF tree. The pose should settle within the first 20–30 frames. If `map->odom` drifts instantly or the point cloud floats, double-check `extrinsic_T/R` in the YAML.
-4. **Check IMU gating** by plotting `/imu/filtered` (or `/ouster/imu`) variance. Spikes that exceed the configured `acc_cov`/`gyr_cov` will delay convergence—tighten cable routing or increase those covariances slightly.
-5. **Monitor solver health**:
-    - `ros2 topic hz /Odometry` should stay above 10 Hz.
-    - `ros2 topic echo /fastlio/status` (if enabled) or the log should not print `NOT_CONVERGED` warnings after the initial second.
-6. **Log the run** with `ros2 bag record /Odometry /ouster/imu /ouster/points` so you can replay and tweak parameters offline (`ros2 bag play <bag>` with the same config).
-7. **Optionally save a map** by calling `/map_save` after a stable loop closure; compare the resulting `maps/ouster32_longrun.pcd` to ground truth to verify drift.
+3. **Watch RViz /Odometry** and the TF tree. Ensure the pose stabilizes within the first few scans; if not, revisit the `extrinsic_T/R` block in the same YAML.
+4. **Check IMU gating** by plotting `/imu/filtered` (or your IMU topic) variance. Tune `acc_cov` / `gyr_cov` when spikes cause the EKF to stall.
+5. **Monitor solver health** via `ros2 topic hz /Odometry` and the node log—persistent `NOT_CONVERGED` warnings normally indicate parameter mismatches.
+6. **Record a short rosbag** (`ros2 bag record /Odometry /ouster/imu /ouster/points`) so you can replay while iterating on parameters.
+7. **Optional map save**: call `/map_save` after a stable loop to export a `.pcd` map for offline inspection.
 
-If the solver still does not converge:
+If convergence is still poor:
 
-- Re-run LI-Init to re-estimate IMU-LiDAR extrinsics and copy the matrix into `extrinsic_T/R` (leave `extrinsic_est_en: false`).
-- Increase `filter_size_map` gradually (0.2–0.25) if the environment is sparse, or decrease `point_filter_num` if you still see motion blur.
-- For extremely dynamic flights, reduce `max_iteration` to 6 to keep latency bounded and rely on more frequent updates.
+- Re-run LI-Init (or similar) to re-estimate IMU-LiDAR extrinsics and copy them into `extrinsic_T/R` while keeping `extrinsic_est_en: false`.
+- Adjust voxel sizes (`filter_size_map`, `filter_size_surf_min`) to match your environment density; smaller leaf sizes preserve more structure indoors.
+- On highly dynamic platforms lower `max_iteration` to keep latency bounded and rely on faster scan turnaround.
 
 ### Frame IDs & TF integration
 FAST-LIO internally works in a simple `map -> odom -> body` frame chain. By default those IDs are `map`, `camera_init`, and `body`, which works for the original datasets but often does not match a robot's `base_link` / `odom` frames. Every config file can now override the TF frame names:
