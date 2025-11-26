@@ -44,6 +44,7 @@
 #include <Python.h>
 #include <so3_math.h>
 #include <rclcpp/rclcpp.hpp>
+#include <rclcpp/executors/multi_threaded_executor.hpp>
 #include <Eigen/Core>
 #include "IMU_Processing.hpp"
 #include <nav_msgs/msg/odometry.hpp>
@@ -66,6 +67,9 @@
 #endif
 #include "preprocess.h"
 #include <ikd-Tree/ikd_Tree.h>
+#ifdef FASTLIO_USE_CUDA
+#include "gpu/gpu_voxel_map.hpp"
+#endif
 
 #define INIT_TIME           (0.1)
 #define LASER_POINT_COV     (0.001)
@@ -126,6 +130,9 @@ PointCloudXYZI::Ptr _featsArray;
 
 pcl::VoxelGrid<PointType> downSizeFilterSurf;
 pcl::VoxelGrid<PointType> downSizeFilterMap;
+#ifdef FASTLIO_USE_CUDA
+std::unique_ptr<fastlio::gpu::VoxelDownsampler> gpu_downsampler_surf;
+#endif
 
 KD_TREE<PointType> ikdtree;
 
@@ -902,8 +909,20 @@ public:
 
         memset(point_selected_surf, true, sizeof(point_selected_surf));
         memset(res_last, -1000.0f, sizeof(res_last));
-        downSizeFilterSurf.setLeafSize(filter_size_surf_min, filter_size_surf_min, filter_size_surf_min);
-        downSizeFilterMap.setLeafSize(filter_size_map_min, filter_size_map_min, filter_size_map_min);
+    downSizeFilterSurf.setLeafSize(filter_size_surf_min, filter_size_surf_min, filter_size_surf_min);
+    downSizeFilterMap.setLeafSize(filter_size_map_min, filter_size_map_min, filter_size_map_min);
+#ifdef FASTLIO_USE_CUDA
+    gpu_downsampler_surf = std::make_unique<fastlio::gpu::VoxelDownsampler>();
+    if (gpu_downsampler_surf && !gpu_downsampler_surf->available())
+    {
+        RCLCPP_WARN(this->get_logger(), "GPU voxel downsampler unavailable, falling back to CPU VoxelGrid");
+    }
+    else if (gpu_downsampler_surf)
+    {
+        gpu_downsampler_surf->set_leaf_size(static_cast<float>(filter_size_surf_min));
+        RCLCPP_INFO(this->get_logger(), "GPU voxel downsampler initialized (leaf: %.3fm)", filter_size_surf_min);
+    }
+#endif
         memset(point_selected_surf, true, sizeof(point_selected_surf));
         memset(res_last, -1000.0f, sizeof(res_last));
 
@@ -1025,8 +1044,30 @@ private:
             lasermap_fov_segment();
 
             /*** downsample the feature points in a scan ***/
-            downSizeFilterSurf.setInputCloud(feats_undistort);
-            downSizeFilterSurf.filter(*feats_down_body);
+#ifdef FASTLIO_USE_CUDA
+            static bool logged_gpu_downsample_once = false;
+            static bool logged_gpu_downsample_fallback = false;
+            bool gpu_filtered = false;
+            if (gpu_downsampler_surf && gpu_downsampler_surf->available())
+            {
+                gpu_filtered = gpu_downsampler_surf->filter(*feats_undistort, *feats_down_body);
+                if (gpu_filtered && !logged_gpu_downsample_once)
+                {
+                    RCLCPP_INFO(this->get_logger(), "CUDA voxel downsampler active during filtering.");
+                    logged_gpu_downsample_once = true;
+                }
+                else if (!gpu_filtered && !logged_gpu_downsample_fallback)
+                {
+                    RCLCPP_WARN(this->get_logger(), "CUDA voxel downsampler filter() failed; falling back to CPU path.");
+                    logged_gpu_downsample_fallback = true;
+                }
+            }
+            if (!gpu_filtered)
+#endif
+            {
+                downSizeFilterSurf.setInputCloud(feats_undistort);
+                downSizeFilterSurf.filter(*feats_down_body);
+            }
             t1 = omp_get_wtime();
             feats_down_size = feats_down_body->points.size();
             /*** initialize the map kdtree ***/
@@ -1196,7 +1237,14 @@ int main(int argc, char** argv)
 
     signal(SIGINT, SigHandle);
 
+#ifdef FASTLIO_USE_CUDA
+    auto node = std::make_shared<LaserMappingNode>();
+    rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 4);
+    executor.add_node(node);
+    executor.spin();
+#else
     rclcpp::spin(std::make_shared<LaserMappingNode>());
+#endif
 
     if (rclcpp::ok())
         rclcpp::shutdown();

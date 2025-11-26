@@ -30,14 +30,14 @@
             fov_degree:    360.0
             det_range:     150.0
             extrinsic_est_en:  false      # Let FAST-LIO refine the LiDAR-IMU extrinsic during motion
-            extrinsic_T: [0.12, 0.3, 0.0]   # Replace with measured translation (LiDAR in IMU frame)
+            extrinsic_T: [-0.12, -0.3, 0.0]   # Replace with measured translation (LiDAR in IMU frame)
             extrinsic_R: [1.0,  0.0,  0.0,
                            0.0, 1.0,  0.0,
                            0.0,  0.0,  1.0]
         frames:
             map_frame:   "map"
             odom_frame:  "odom"
-            body_frame:  "base_link"
+            body_frame:  "os_lidar"
 
         publish:
             path_en:  true

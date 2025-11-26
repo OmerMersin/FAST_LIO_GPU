@@ -1,7 +1,9 @@
+ #pragma once
 // #include <ros/ros.h>
 #include <rclcpp/rclcpp.hpp>
 #include <pcl_conversions/pcl_conversions.h>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <memory>
 #ifdef FASTLIO_HAS_LIVOX
 #include <livox_ros_driver2/msg/custom_msg.hpp>
 #endif
@@ -152,6 +154,16 @@ POINT_CLOUD_REGISTER_POINT_STRUCT(livox_ros::LivoxPointXyzitl,
     (uint8_t, line, line)
 )
 
+#ifdef FASTLIO_USE_CUDA
+namespace fastlio
+{
+namespace gpu
+{
+class FeatureExtractor;
+}  // namespace gpu
+}  // namespace fastlio
+#endif
+
 class Preprocess
 {
   public:
@@ -174,6 +186,9 @@ class Preprocess
   int lidar_type, point_filter_num, N_SCANS, SCAN_RATE, time_unit;
   double blind;
   bool feature_enabled, given_offset_time;
+#ifdef FASTLIO_USE_CUDA
+  std::unique_ptr<fastlio::gpu::FeatureExtractor> gpu_feature_extractor_;
+#endif
   // ros::Publisher pub_full, pub_surf, pub_corn;
 
 private:

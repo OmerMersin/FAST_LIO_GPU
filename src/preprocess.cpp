@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <pcl/common/common.h>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
+#ifdef FASTLIO_USE_CUDA
+#include "gpu/preprocess_gpu.hpp"
+#endif
 
 namespace
 {
@@ -42,6 +45,9 @@ Preprocess::Preprocess() : feature_enabled(0), lidar_type(AVIA), blind(0.01), po
   jump_down_limit = cos(jump_down_limit / 180 * M_PI);
   cos160 = cos(cos160 / 180 * M_PI);
   smallp_intersect = cos(smallp_intersect / 180 * M_PI);
+#ifdef FASTLIO_USE_CUDA
+  gpu_feature_extractor_ = std::make_unique<fastlio::gpu::FeatureExtractor>();
+#endif
 }
 
 Preprocess::~Preprocess()
@@ -343,26 +349,64 @@ void Preprocess::oust64_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &
       process_point(xyz_cloud.points[idx], idx, true);
     }
 
-    for (int j = 0; j < N_SCANS; j++)
+#ifdef FASTLIO_USE_CUDA
+    static bool logged_gpu_feature_once = false;
+    static bool logged_gpu_feature_fallback = false;
+    const bool gpu_available = gpu_feature_extractor_ && gpu_feature_extractor_->available();
+    bool gpu_processed = false;
+    if (gpu_available)
     {
-      PointCloudXYZI &pl = pl_buff[j];
-      int linesize = pl.size();
-      if (linesize <= 0)
-        continue;
-      vector<orgtype> &types = typess[j];
-      types.clear();
-      types.resize(linesize);
-      linesize--;
-      for (uint i = 0; i < linesize; i++)
+      gpu_processed = gpu_feature_extractor_->compute(pl_buff, typess, N_SCANS);
+      if (gpu_processed && !logged_gpu_feature_once)
       {
-        types[i].range = sqrt(pl[i].x * pl[i].x + pl[i].y * pl[i].y);
-        vx = pl[i].x - pl[i + 1].x;
-        vy = pl[i].y - pl[i + 1].y;
-        vz = pl[i].z - pl[i + 1].z;
-        types[i].dista = vx * vx + vy * vy + vz * vz;
+        RCLCPP_INFO(kPreLogger, "CUDA feature extractor active for Ouster scans.");
+        logged_gpu_feature_once = true;
       }
-      types[linesize].range = sqrt(pl[linesize].x * pl[linesize].x + pl[linesize].y * pl[linesize].y);
-      give_feature(pl, types);
+      else if (!gpu_processed && !logged_gpu_feature_fallback)
+      {
+        RCLCPP_WARN(kPreLogger, "CUDA feature extractor failed to launch; using CPU fallback for now.");
+        logged_gpu_feature_fallback = true;
+      }
+    }
+    else if (!logged_gpu_feature_fallback)
+    {
+      RCLCPP_WARN(kPreLogger, "CUDA feature extractor unavailable; using CPU fallback.");
+      logged_gpu_feature_fallback = true;
+    }
+    if (gpu_processed)
+    {
+      for (int j = 0; j < N_SCANS; j++)
+      {
+        PointCloudXYZI &pl = pl_buff[j];
+        if (pl.empty())
+          continue;
+        give_feature(pl, typess[j]);
+      }
+    }
+    else
+#endif
+    {
+      for (int j = 0; j < N_SCANS; j++)
+      {
+        PointCloudXYZI &pl = pl_buff[j];
+        int linesize = pl.size();
+        if (linesize <= 0)
+          continue;
+        vector<orgtype> &types = typess[j];
+        types.clear();
+        types.resize(linesize);
+        linesize--;
+        for (uint i = 0; i < linesize; i++)
+        {
+          types[i].range = sqrt(pl[i].x * pl[i].x + pl[i].y * pl[i].y);
+          vx = pl[i].x - pl[i + 1].x;
+          vy = pl[i].y - pl[i + 1].y;
+          vz = pl[i].z - pl[i + 1].z;
+          types[i].dista = vx * vx + vy * vy + vz * vz;
+        }
+        types[linesize].range = sqrt(pl[linesize].x * pl[linesize].x + pl[linesize].y * pl[linesize].y);
+        give_feature(pl, types);
+      }
     }
   }
   else
